@@ -943,6 +943,40 @@ Status change_master_config_action(
   return Status::OK();
 }
 
+const auto add_master_args = "<ip_addr> <port> [<uuid>]";
+// The goal here is to use the same code as change_master_config_action,
+// but add more checks like waiting for remote bootstrap to finish,
+// calling ListMasters to check if the master is healthy,
+// and ensure that follower lag is within a reasonable range.
+Status add_master_action(
+    const ClusterAdminCli::CLIArguments& args, ClusterAdminClient* client) {
+  uint16_t new_port = 0;
+  string new_host;
+
+  if (args.size() < 2 || args.size() > 3) {
+    return ClusterAdminCli::kInvalidArguments;
+  }
+
+  const string change_type = "ADD_SERVER";
+
+  new_host = args[0];
+  new_port = VERIFY_RESULT(CheckedStoi(args[1]));
+
+  string given_uuid;
+  if (args.size() == 3) {
+    given_uuid = args[2];
+  }
+  
+  Status s = client->ChangeMasterConfig(change_type, new_host, new_port, given_uuid);
+  if (!s.ok()) {
+    RETURN_NOT_OK_PREPEND(s, "Unable to change master config");
+  }
+
+  // Wait for the new master to finish remote bootstrap.
+  
+}
+
+
 const auto dump_masters_state_args = "[CONSOLE]";
 Status dump_masters_state_action(
     const ClusterAdminCli::CLIArguments& args, ClusterAdminClient* client) {
@@ -2211,6 +2245,8 @@ void ClusterAdminCli::RegisterCommandHandlers() {
   REGISTER_COMMAND(list_all_tablet_servers);
   REGISTER_COMMAND(list_all_masters);
   REGISTER_COMMAND(change_master_config);
+  REGISTER_COMMAND(add_master);
+  REGISTER_COMMAND(remove_master);
   REGISTER_COMMAND(dump_masters_state);
   REGISTER_COMMAND(list_tablet_server_log_locations);
   REGISTER_COMMAND(list_tablets_for_tablet_server);
