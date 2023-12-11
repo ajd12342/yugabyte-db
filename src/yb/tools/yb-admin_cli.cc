@@ -967,7 +967,27 @@ Status add_master_action(
 }
 
 const auto remove_master_args = "<ip_addr> <port> [<uuid>]";
+Status remove_master_action(
+    const ClusterAdminCli::CLIArguments& args, ClusterAdminClient* client) {
+  uint16_t new_port = 0;
+  string new_host;
 
+  if (args.size() < 2 || args.size() > 3) {
+    return ClusterAdminCli::kInvalidArguments;
+  }
+
+  new_host = args[0];
+  new_port = VERIFY_RESULT(CheckedStoi(args[1]));
+
+  string given_uuid;
+  if (args.size() == 3) {
+    given_uuid = args[2];
+  }
+  RETURN_NOT_OK_PREPEND(
+      client->RemoveMaster(new_host, new_port, given_uuid), "Unable to remove master");
+
+  return Status::OK();
+}
 
 
 const auto dump_masters_state_args = "[CONSOLE]";

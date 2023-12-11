@@ -1271,7 +1271,8 @@ Status ClusterAdminClient::AddMaster(
     RETURN_NOT_OK_PREPEND(s, "Unable to add master");
   }
   // Get the master's UUID
-  yb_client_->GetMasterUUID(peer_host, peer_port, &peer_uuid);
+  string peer_real_uuid;
+  RETURN_NOT_OK(yb_client_->GetMasterUUID(peer_host, peer_port, &peer_real_uuid));
   
   // Wait until the new master has entered the FOLLOWER consensus state.
   // I think this automatically ensures that the new master has finished remote bootstrap,
@@ -1292,16 +1293,58 @@ Status ClusterAdminClient::AddMaster(
     for (const auto& master : list_resp.masters()) {
       if (master.has_registration() &&
           master.has_instance_id() &&
-          master.instance_id().permanent_uuid() == peer_uuid &&
+          master.instance_id().permanent_uuid() == peer_real_uuid &&
           master.has_role() &&
-          master.role() == PeerRole::FOLLOWER) {
+          (master.role() == PeerRole::FOLLOWER || master.role() == PeerRole::LEADER)) {
             found_in_follower_state = true;
             break;
       }
     }
-    
+    if (found_in_follower_state) {
+      break;
+    }
+    if (iter == kNumberOfTryouts - 1) {
+      return STATUS_FORMAT(
+          TimedOut, "Added master $0:$1 did not become a follower after $2 tries",
+          peer_host, peer_port, kNumberOfTryouts);
+    }
+    sleep(kSleepTimeSec);
   }
+
+  // Check if the follower lag is within bounds.
+  // TODO (ajd12342)
+  // std::unique_ptr<consensus::ConsensusServiceProxy> follower_proxy(
+    // new consensus::ConsensusServiceProxy(proxy_cache_.get(), HostPort(peer_host, peer_port)));
   return Status::OK();
+}
+
+Status ClusterAdminClient::RemoveMaster(
+    const string& peer_host,
+    uint16_t peer_port,
+    const string& peer_uuid) {
+  // Reject if the master to be removed is the current leader.
+  if (leader_addr_ == HostPort(peer_host, peer_port)) {
+    return STATUS(InvalidArgument, "Cannot remove the current leader master");
+  }
+  // Ensure that there are at least 3 masters in voting state (i.e. FOLLOWER or LEADER)
+  // after removal, to maintain quorum.
+  const auto list_resp = VERIFY_RESULT(InvokeRpc(
+      &master::MasterClusterProxy::ListMasters, *master_cluster_proxy_, ListMastersRequestPB()));
+  int num_masters = 0;
+  for (const auto& master : list_resp.masters()) {
+    if (master.has_registration() &&
+        master.has_instance_id() &&
+        master.instance_id().permanent_uuid() != peer_uuid &&
+        master.has_role() &&
+        (master.role() == PeerRole::FOLLOWER || master.role() == PeerRole::LEADER)) {
+      ++num_masters;
+    }
+  }
+  if (num_masters < 3) {
+    return STATUS(InvalidArgument, "Cannot remove master, less than 3 masters able to vote if removal proceeds");
+  }
+  // TODO (ajd12342): Check that follower lag for a majority of followers excluding the one being removed is within bounds.
+  return ChangeMasterConfig("REMOVE_SERVER", peer_host, peer_port, peer_uuid);
 }
 
 Status ClusterAdminClient::GetTabletLocations(const TabletId& tablet_id,
