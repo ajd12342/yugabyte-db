@@ -944,10 +944,6 @@ Status change_master_config_action(
 }
 
 const auto add_master_args = "<ip_addr> <port> [<uuid>]";
-// The goal here is to use the same code as change_master_config_action,
-// but add more checks like waiting for remote bootstrap to finish,
-// calling ListMasters to check if the master is healthy,
-// and ensure that follower lag is within a reasonable range.
 Status add_master_action(
     const ClusterAdminCli::CLIArguments& args, ClusterAdminClient* client) {
   uint16_t new_port = 0;
@@ -957,8 +953,6 @@ Status add_master_action(
     return ClusterAdminCli::kInvalidArguments;
   }
 
-  const string change_type = "ADD_SERVER";
-
   new_host = args[0];
   new_port = VERIFY_RESULT(CheckedStoi(args[1]));
 
@@ -966,15 +960,14 @@ Status add_master_action(
   if (args.size() == 3) {
     given_uuid = args[2];
   }
-  
-  Status s = client->ChangeMasterConfig(change_type, new_host, new_port, given_uuid);
-  if (!s.ok()) {
-    RETURN_NOT_OK_PREPEND(s, "Unable to change master config");
-  }
+  RETURN_NOT_OK_PREPEND(
+      client->AddMaster(new_host, new_port, given_uuid), "Unable to add master");
 
-  // Wait for the new master to finish remote bootstrap.
-  
+  return Status::OK();
 }
+
+const auto remove_master_args = "<ip_addr> <port> [<uuid>]";
+
 
 
 const auto dump_masters_state_args = "[CONSOLE]";

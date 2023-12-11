@@ -1258,6 +1258,52 @@ Status ClusterAdminClient::ChangeMasterConfig(
   return Status::OK();
 }
 
+// The goal here is to use the same code as ChangeMasterConfig() above,
+// but add more checks like waiting for remote bootstrap to finish,
+// calling ListMasters to check if the master is healthy,
+// and ensure that follower lag is within a reasonable range.
+Status ClusterAdminClient::AddMaster(
+    const string& peer_host,
+    uint16_t peer_port,
+    const string& peer_uuid) {
+  Status s = ChangeMasterConfig("ADD_SERVER", peer_host, peer_port, peer_uuid);
+  if (!s.ok()) {
+    RETURN_NOT_OK_PREPEND(s, "Unable to add master");
+  }
+  // Get the master's UUID
+  yb_client_->GetMasterUUID(peer_host, peer_port, &peer_uuid);
+  
+  // Wait until the new master has entered the FOLLOWER consensus state.
+  // I think this automatically ensures that the new master has finished remote bootstrap,
+  // since the master has voting rights and can become leader i.e.
+  // We implement a simple polling mechanism here, waiting for the new master to
+  // become a follower of the current leader.
+  // TODO(ajd12342): Replace with an RPC that returns when the new master becomes a follower.
+  for(int iter = 0; iter < kNumberOfTryouts; ++iter) {
+    const auto list_resp = VERIFY_RESULT(InvokeRpc(
+        &master::MasterClusterProxy::ListMasters, *master_cluster_proxy_, ListMastersRequestPB()));
+
+    if (list_resp.has_error()) {
+      LOG(ERROR) << "Error: querying leader master for live master info to find status of added master: "
+                 << list_resp.error().DebugString() << endl;
+      return STATUS(RemoteError, list_resp.error().DebugString());
+    }
+    bool found_in_follower_state = false;
+    for (const auto& master : list_resp.masters()) {
+      if (master.has_registration() &&
+          master.has_instance_id() &&
+          master.instance_id().permanent_uuid() == peer_uuid &&
+          master.has_role() &&
+          master.role() == PeerRole::FOLLOWER) {
+            found_in_follower_state = true;
+            break;
+      }
+    }
+    
+  }
+  return Status::OK();
+}
+
 Status ClusterAdminClient::GetTabletLocations(const TabletId& tablet_id,
                                               TabletLocationsPB* locations) {
   master::GetTabletLocationsRequestPB req;
