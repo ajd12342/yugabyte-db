@@ -1289,18 +1289,18 @@ Status ClusterAdminClient::AddMaster(
                  << list_resp.error().DebugString() << endl;
       return STATUS(RemoteError, list_resp.error().DebugString());
     }
-    bool found_in_follower_state = false;
+    bool found_in_voting_state = false;
     for (const auto& master : list_resp.masters()) {
       if (master.has_registration() &&
           master.has_instance_id() &&
           master.instance_id().permanent_uuid() == peer_real_uuid &&
           master.has_role() &&
           (master.role() == PeerRole::FOLLOWER || master.role() == PeerRole::LEADER)) {
-            found_in_follower_state = true;
+            found_in_voting_state = true;
             break;
       }
     }
-    if (found_in_follower_state) {
+    if (found_in_voting_state) {
       break;
     }
     if (iter == kNumberOfTryouts - 1) {
@@ -1330,21 +1330,64 @@ Status ClusterAdminClient::RemoveMaster(
   // after removal, to maintain quorum.
   const auto list_resp = VERIFY_RESULT(InvokeRpc(
       &master::MasterClusterProxy::ListMasters, *master_cluster_proxy_, ListMastersRequestPB()));
-  int num_masters = 0;
+  int num_voting_masters = 0;
   for (const auto& master : list_resp.masters()) {
     if (master.has_registration() &&
         master.has_instance_id() &&
         master.instance_id().permanent_uuid() != peer_uuid &&
         master.has_role() &&
         (master.role() == PeerRole::FOLLOWER || master.role() == PeerRole::LEADER)) {
-      ++num_masters;
+      ++num_voting_masters;
     }
   }
-  if (num_masters < 3) {
+  if (num_voting_masters < 3) {
     return STATUS(InvalidArgument, "Cannot remove master, less than 3 masters able to vote if removal proceeds");
   }
   // TODO (ajd12342): Check that follower lag for a majority of followers excluding the one being removed is within bounds.
-  return ChangeMasterConfig("REMOVE_SERVER", peer_host, peer_port, peer_uuid);
+
+  // Get the master's UUID
+  string peer_real_uuid;
+  RETURN_NOT_OK(yb_client_->GetMasterUUID(peer_host, peer_port, &peer_real_uuid));
+
+  Status s = ChangeMasterConfig("REMOVE_MASTER", peer_host, peer_port, peer_uuid);
+  if (!s.ok()) {
+    RETURN_NOT_OK_PREPEND(s, "Unable to remove master");
+  }
+
+  // Wait until the removed master is no longer in the list of live masters.
+  // We implement a simple polling mechanism here, waiting for the removed master to
+  // disappear from the list of live masters.
+  // TODO (ajd12342): Replace with an RPC that returns when the removed master is no longer live.
+
+  for(int iter = 0; iter < kNumberOfTryouts; ++iter) {
+    const auto list_resp = VERIFY_RESULT(InvokeRpc(
+        &master::MasterClusterProxy::ListMasters, *master_cluster_proxy_, ListMastersRequestPB()));
+
+    if (list_resp.has_error()) {
+      LOG(ERROR) << "Error: querying leader master for live master info to find status of removed master: "
+                 << list_resp.error().DebugString() << endl;
+      return STATUS(RemoteError, list_resp.error().DebugString());
+    }
+    bool found_removed_master = false;
+    for (const auto& master : list_resp.masters()) {
+      if (master.has_registration() &&
+          master.has_instance_id() &&
+          master.instance_id().permanent_uuid() == peer_uuid) {
+            found_removed_master = true;
+            break;
+      }
+    }
+    if (!found_removed_master) {
+      break;
+    }
+    if (iter == kNumberOfTryouts - 1) {
+      return STATUS_FORMAT(
+          TimedOut, "Removed master $0:$1 still exists after $2 tries",
+          peer_host, peer_port, kNumberOfTryouts);
+    }
+    sleep(kSleepTimeSec);
+  }
+  return Status::OK();
 }
 
 Status ClusterAdminClient::GetTabletLocations(const TabletId& tablet_id,
